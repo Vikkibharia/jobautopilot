@@ -7,7 +7,7 @@ ADZUNA_APP_ID = os.environ.get("ADZUNA_APP_ID", "")
 ADZUNA_APP_KEY = os.environ.get("ADZUNA_APP_KEY", "")
 JOOBLE_API_KEY = os.environ.get("JOOBLE_API_KEY", "")
 
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-2.5-flash"
 MAX_LLM_SCORES_PER_RUN = 60          # protects the free quota across all users
 MAX_MATCH_MESSAGES_PER_USER = 8      # per run, avoid spamming a chat
 
