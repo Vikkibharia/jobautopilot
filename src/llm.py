@@ -3,30 +3,56 @@ import time
 import requests
 from .config import GEMINI_API_KEY, GEMINI_MODEL
 
-FALLBACK_MODELS = [GEMINI_MODEL, "gemini-2.0-flash", "gemini-2.5-flash-lite"]
+BASE = "https://generativelanguage.googleapis.com/v1beta"
+HEADERS = {"x-goog-api-key": GEMINI_API_KEY}
+_working_model = None
+
+
+def _candidate_models() -> list[str]:
+    try:
+        r = requests.get(f"{BASE}/models?pageSize=200", headers=HEADERS, timeout=30)
+        names = [m["name"].removeprefix("models/")
+                 for m in r.json().get("models", [])
+                 if "generateContent" in m.get("supportedGenerationMethods", [])]
+    except Exception:
+        names = []
+
+    def usable(n):
+        bad = ("tts", "image", "audio", "live", "embedding", "veo", "imagen", "thinking")
+        return not any(b in n for b in bad)
+
+    lite = sorted([n for n in names if "flash-lite" in n and usable(n)], reverse=True)
+    flash = sorted([n for n in names if "flash" in n and "lite" not in n and usable(n)], reverse=True)
+    ordered = lite + flash
+    return ordered[:6] or ["gemini-flash-lite-latest", "gemini-flash-latest", GEMINI_MODEL]
 
 
 def _generate(prompt: str) -> str:
+    global _working_model
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"},
     }
-    headers = {"x-goog-api-key": GEMINI_API_KEY}
-    last_error = "unknown"
-    for model in FALLBACK_MODELS:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        for attempt in range(3):
-            r = requests.post(url, json=body, headers=headers, timeout=60)
+    models = _candidate_models()
+    if _working_model in models:
+        models.remove(_working_model)
+    if _working_model:
+        models.insert(0, _working_model)
+
+    errors = []
+    for model in models:
+        for attempt in range(2):
+            r = requests.post(f"{BASE}/models/{model}:generateContent",
+                              json=body, headers=HEADERS, timeout=60)
             if r.status_code == 200:
+                _working_model = model
                 return r.json()["candidates"][0]["content"]["parts"][0]["text"]
             if r.status_code == 429:
-                time.sleep(15 * (attempt + 1))
+                time.sleep(20)
                 continue
-            last_error = f"model {model} returned status {r.status_code}"
             break
-        else:
-            last_error = f"model {model} rate limited"
-    raise RuntimeError(f"Gemini request failed: {last_error}")
+        errors.append(f"{model}:{r.status_code}")
+    raise RuntimeError(f"Gemini failed on all models: {', '.join(errors)}")
 
 
 def _json(prompt: str):
@@ -34,6 +60,7 @@ def _json(prompt: str):
     if text.startswith("```"):
         text = text.strip("`").removeprefix("json").strip()
     return json.loads(text)
+
 
 def parse_cv(cv_text: str) -> dict:
     prompt = f"""You are a CV parser. Read the CV below and return ONLY a JSON object with:
@@ -54,8 +81,6 @@ CV:
 
 
 def score_jobs(profile: dict, jobs: list[dict]) -> list[dict]:
-    """Score a small batch of jobs (<=8) against one profile. Returns list of
-    {index, score, classification, rationale}."""
     jobs_block = "\n\n".join(
         f"[{i}] TITLE: {j['title']} | COMPANY: {j.get('company','?')} | LOCATION: {j.get('location','?')}\n"
         f"DESCRIPTION: {(j.get('description') or '')[:1500]}"
