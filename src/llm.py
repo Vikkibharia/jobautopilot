@@ -1,8 +1,9 @@
 import json
+import time
 import requests
 from .config import GEMINI_API_KEY, GEMINI_MODEL
 
-URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+FALLBACK_MODELS = [GEMINI_MODEL, "gemini-2.0-flash", "gemini-2.5-flash-lite"]
 
 
 def _generate(prompt: str) -> str:
@@ -10,9 +11,22 @@ def _generate(prompt: str) -> str:
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"},
     }
-    r = requests.post(URL, json=body, timeout=60)
-    r.raise_for_status()
-    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+    headers = {"x-goog-api-key": GEMINI_API_KEY}
+    last_error = "unknown"
+    for model in FALLBACK_MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        for attempt in range(3):
+            r = requests.post(url, json=body, headers=headers, timeout=60)
+            if r.status_code == 200:
+                return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+            if r.status_code == 429:
+                time.sleep(15 * (attempt + 1))
+                continue
+            last_error = f"model {model} returned status {r.status_code}"
+            break
+        else:
+            last_error = f"model {model} rate limited"
+    raise RuntimeError(f"Gemini request failed: {last_error}")
 
 
 def _json(prompt: str):
@@ -20,7 +34,6 @@ def _json(prompt: str):
     if text.startswith("```"):
         text = text.strip("`").removeprefix("json").strip()
     return json.loads(text)
-
 
 def parse_cv(cv_text: str) -> dict:
     prompt = f"""You are a CV parser. Read the CV below and return ONLY a JSON object with:
