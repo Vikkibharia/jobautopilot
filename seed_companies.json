@@ -1,4 +1,9 @@
 {
-  "greenhouse": ["razorpay", "postman", "hasura", "cred", "meesho", "groww", "gojek", "phonepe", "browserstack", "innovaccer"],
-  "lever": ["zepto", "atlan", "netradyne", "porter", "medgenome", "dunzo"]
+  "_note": "Greenhouse/Lever slugs = the last path segment of a company's careers URL. A wrong slug just logs an ingest_error and is skipped, so guessing is cheap. Verify at boards.greenhouse.io/<slug> or jobs.lever.co/<slug>.",
+  "greenhouse": ["razorpay", "postman", "hasura", "cred", "meesho", "groww", "gojek",
+                 "phonepe", "browserstack", "innovaccer", "swiggy", "zomato", "nykaa",
+                 "sharechat", "unacademy", "purplle", "urbancompany", "lenskart",
+                 "zetwerk", "licious", "bigbasket", "physicswallah"],
+  "lever": ["zepto", "atlan", "netradyne", "porter", "medgenome", "dunzo",
+            "mamaearth", "wakefit", "boat-lifestyle", "cultfit", "jupiter"]
 }

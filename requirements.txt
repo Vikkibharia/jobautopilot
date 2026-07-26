@@ -1,3 +1,5 @@
 requests==2.32.3
 supabase==2.15.0
 pypdf==5.4.0
+# Tier-2 browser automation is OPTIONAL and runs locally, never in Actions:
+#   pip install playwright && playwright install chromium
