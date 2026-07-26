@@ -2,8 +2,11 @@ name: Job Scan
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes
+    - cron: "*/30 * * * *"   # every 30 minutes (GitHub cron is best-effort; drift is normal)
   workflow_dispatch: {}       # allows manual "Run workflow" button
+
+permissions:
+  contents: read
 
 concurrency:
   group: job-scan
@@ -12,7 +15,7 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -32,4 +35,8 @@ jobs:
           ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
           ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
           JOOBLE_API_KEY: ${{ secrets.JOOBLE_API_KEY }}
+          # Phase 3 — job-alert mailbox (leave unset and email ingest just stays off)
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          ALERT_EMAIL_APP_PASSWORD: ${{ secrets.ALERT_EMAIL_APP_PASSWORD }}
+          ALERT_IMAP_HOST: ${{ secrets.ALERT_IMAP_HOST }}
         run: python -m src.main
