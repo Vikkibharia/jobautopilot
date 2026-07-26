@@ -1,100 +1,164 @@
 import hashlib
+import html
 import json
 import re
 import requests
-from .config import sb, ADZUNA_APP_ID, ADZUNA_APP_KEY, JOOBLE_API_KEY, log_event
+from .config import (sb, ADZUNA_APP_ID, ADZUNA_APP_KEY, JOOBLE_API_KEY, log_event)
+from .email_ingest import fetch_email_alerts
 
-HEADERS = {"User-Agent": "JobAutopilot/1.0"}
+HEADERS = {"User-Agent": "JobAutopilot/2.0"}
+INDIA_KEYS = ("india", "remote", "bengaluru", "bangalore", "mumbai", "delhi", "gurgaon",
+              "gurugram", "hyderabad", "pune", "chennai", "noida", "kolkata", "ahmedabad",
+              "jaipur", "indore", "kochi", "coimbatore", "chandigarh", "anywhere")
 
 
 def _clean(text: str) -> str:
-    return re.sub(r"<[^>]+>", " ", text or "").strip()
+    """FIX: Phase 1 stripped tags but left HTML entities, so Greenhouse descriptions
+    reached Gemini full of &amp;#39; and &nbsp; — noise the scorer had to pay tokens for."""
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", text or ""))).strip()
 
 
-def _dedup_hash(title: str, company: str, location: str) -> str:
-    key = f"{(title or '').lower().strip()}|{(company or '').lower().strip()}|{(location or '').lower().strip()[:20]}"
+def _dedup_hash(row: dict) -> str:
+    """FIX: Phase 1 hashed title|company|location only, so two genuinely different
+    'Software Engineer' roles at the same company in Bengaluru collapsed into one.
+    Where a source gives a stable id, use it."""
+    ext = (row.get("external_id") or "").strip()
+    if ext:
+        key = f"{row.get('source','')}|{ext}"
+    else:
+        key = (f"{(row.get('title') or '').lower().strip()}|"
+               f"{(row.get('company') or '').lower().strip()}|"
+               f"{(row.get('location') or '').lower().strip()[:20]}")
     return hashlib.sha256(key.encode()).hexdigest()[:32]
 
 
 def _save(rows: list[dict]) -> int:
-    saved = 0
+    """FIX: Phase 1 did one HTTP INSERT per job (up to ~400 round trips per run and a
+    swallowed exception each time a duplicate hit the UNIQUE constraint). One upsert
+    with ignore_duplicates does the same job in a couple of calls."""
+    if not rows:
+        return 0
+    clean = []
+    seen = set()
     for row in rows:
-        row["dedup_hash"] = _dedup_hash(row["title"], row.get("company", ""), row.get("location", ""))
+        if not (row.get("title") and row.get("url")):
+            continue
+        row["dedup_hash"] = _dedup_hash(row)
+        if row["dedup_hash"] in seen:          # dedupe within this batch too
+            continue
+        seen.add(row["dedup_hash"])
+        row.setdefault("apply_policy", "auto_ok")
+        clean.append(row)
+
+    saved = 0
+    for i in range(0, len(clean), 100):
+        chunk = clean[i:i + 100]
         try:
-            sb.table("jobs").insert(row).execute()
-            saved += 1
-        except Exception:
-            pass  # duplicate hash -> already known
+            r = (sb.table("jobs")
+                 .upsert(chunk, on_conflict="dedup_hash", ignore_duplicates=True)
+                 .execute())
+            saved += len(r.data or [])
+        except Exception as e:
+            log_event("save_error", {"error": str(e)[:300], "batch": len(chunk)})
     return saved
+
+
+# ---------------------------- keyword-driven sources ----------------------------
+
+def _user_search_terms(limit: int = 8) -> list[str]:
+    """FIX (biggest match-quality lever): Phase 1 asked Adzuna for the newest 50 India
+    jobs of ANY kind, then hoped the prefilter found something. With ~800k live jobs in
+    India, a blind newest-50 feed almost never contains a role for a specific person.
+    Now we ask Adzuna for the titles our users actually want."""
+    try:
+        rows = (sb.table("users").select("profile")
+                .eq("active", True).not_.is_("profile", "null").execute().data) or []
+    except Exception:
+        return []
+    terms, seen = [], set()
+    for row in rows:
+        p = row.get("profile") or {}
+        for t in ((p.get("lateral_titles") or [])[:4] + (p.get("next_step_titles") or [])[:3]):
+            t = (t or "").strip().lower()
+            if t and t not in seen and 3 < len(t) < 60:
+                seen.add(t)
+                terms.append(t)
+    return terms[:limit]
 
 
 def fetch_adzuna() -> list[dict]:
     if not (ADZUNA_APP_ID and ADZUNA_APP_KEY):
         return []
-    url = (
-        "https://api.adzuna.com/v1/api/jobs/in/search/1"
-        f"?app_id={ADZUNA_APP_ID}&app_key={ADZUNA_APP_KEY}"
-        "&results_per_page=50&max_days_old=1&sort_by=date&content-type=application/json"
-    )
-    try:
-        data = requests.get(url, headers=HEADERS, timeout=30).json()
-    except Exception as e:
-        log_event("ingest_error", {"source": "adzuna", "error": str(e)})
-        return []
-    return [
-        {
-            "source": "adzuna",
-            "external_id": str(j.get("id", "")),
-            "title": j.get("title", "")[:300],
-            "company": (j.get("company") or {}).get("display_name", ""),
-            "location": (j.get("location") or {}).get("display_name", ""),
-            "description": _clean(j.get("description", ""))[:6000],
-            "url": j.get("redirect_url", ""),
-            "ats": "unknown",
-            "salary": str(j.get("salary_min") or ""),
-            "posted_at": j.get("created"),
-        }
-        for j in data.get("results", [])
-        if j.get("title") and j.get("redirect_url")
-    ]
+    out = []
+    terms = _user_search_terms() or [""]        # "" keeps Phase 1's generic sweep as a floor
+    for term in terms:
+        url = ("https://api.adzuna.com/v1/api/jobs/in/search/1"
+               f"?app_id={ADZUNA_APP_ID}&app_key={ADZUNA_APP_KEY}"
+               "&results_per_page=50&max_days_old=2&sort_by=date"
+               "&content-type=application/json")
+        if term:
+            url += f"&what={requests.utils.quote(term)}"
+        try:
+            data = requests.get(url, headers=HEADERS, timeout=30).json()
+        except Exception as e:
+            log_event("ingest_error", {"source": "adzuna", "term": term, "error": str(e)[:300]})
+            continue
+        for j in data.get("results", []):
+            if not (j.get("title") and j.get("redirect_url")):
+                continue
+            out.append({
+                "source": "adzuna",
+                "external_id": str(j.get("id", "")),
+                "title": j.get("title", "")[:300],
+                "company": (j.get("company") or {}).get("display_name", ""),
+                "location": (j.get("location") or {}).get("display_name", ""),
+                "description": _clean(j.get("description", ""))[:6000],
+                "url": j.get("redirect_url", ""),
+                "ats": "unknown",
+                "salary": str(j.get("salary_min") or ""),
+                "posted_at": j.get("created"),
+            })
+    return out
 
 
 def fetch_jooble() -> list[dict]:
     if not JOOBLE_API_KEY:
         return []
-    try:
-        r = requests.post(
-            f"https://jooble.org/api/{JOOBLE_API_KEY}",
-            json={"keywords": "", "location": "India", "datecreatedfrom": "", "page": "1"},
-            headers=HEADERS, timeout=30,
-        )
-        data = r.json()
-    except Exception as e:
-        log_event("ingest_error", {"source": "jooble", "error": str(e)})
-        return []
-    return [
-        {
-            "source": "jooble",
-            "external_id": str(j.get("id", "")),
-            "title": j.get("title", "")[:300],
-            "company": j.get("company", ""),
-            "location": j.get("location", ""),
-            "description": _clean(j.get("snippet", ""))[:6000],
-            "url": j.get("link", ""),
-            "ats": "unknown",
-            "salary": j.get("salary", ""),
-            "posted_at": None,
-        }
-        for j in data.get("jobs", [])
-        if j.get("title") and j.get("link")
-    ]
+    out = []
+    # FIX: Phase 1 posted keywords:"" which Jooble often answers with an error or noise.
+    for term in (_user_search_terms(4) or ["analyst"]):
+        try:
+            r = requests.post(f"https://jooble.org/api/{JOOBLE_API_KEY}",
+                              json={"keywords": term, "location": "India", "page": "1"},
+                              headers=HEADERS, timeout=30)
+            data = r.json()
+        except Exception as e:
+            log_event("ingest_error", {"source": "jooble", "term": term, "error": str(e)[:300]})
+            continue
+        for j in data.get("jobs", []):
+            if not (j.get("title") and j.get("link")):
+                continue
+            out.append({
+                "source": "jooble",
+                "external_id": str(j.get("id", "")),
+                "title": j.get("title", "")[:300],
+                "company": j.get("company", ""),
+                "location": j.get("location", ""),
+                "description": _clean(j.get("snippet", ""))[:6000],
+                "url": j.get("link", ""),
+                "ats": "unknown",
+                "salary": j.get("salary", ""),
+                "posted_at": None,
+            })
+    return out
 
 
 def fetch_remotive() -> list[dict]:
     try:
-        data = requests.get("https://remotive.com/api/remote-jobs?limit=100", headers=HEADERS, timeout=30).json()
+        data = requests.get("https://remotive.com/api/remote-jobs?limit=100",
+                            headers=HEADERS, timeout=30).json()
     except Exception as e:
-        log_event("ingest_error", {"source": "remotive", "error": str(e)})
+        log_event("ingest_error", {"source": "remotive", "error": str(e)[:300]})
         return []
     out = []
     for j in data.get("jobs", []):
@@ -116,52 +180,73 @@ def fetch_remotive() -> list[dict]:
     return out
 
 
+# ---------------------------- open ATS boards ----------------------------
+
+def _india_ok(loc: str) -> bool:
+    return (not loc) or any(k in loc.lower() for k in INDIA_KEYS)
+
+
 def fetch_ats_boards() -> list[dict]:
-    with open("seed_companies.json") as f:
-        seeds = json.load(f)
+    try:
+        with open("seed_companies.json") as f:
+            seeds = json.load(f)
+    except Exception as e:
+        log_event("ingest_error", {"source": "seed_file", "error": str(e)[:200]})
+        return []
+
     out = []
     for company in seeds.get("greenhouse", []):
         try:
             data = requests.get(
                 f"https://boards-api.greenhouse.io/v1/boards/{company}/jobs?content=true",
-                headers=HEADERS, timeout=20,
-            ).json()
+                headers=HEADERS, timeout=20).json()
             for j in data.get("jobs", []):
                 loc = ((j.get("location") or {}).get("name") or "")
-                if loc and not any(k in loc.lower() for k in ("india", "remote", "bengaluru", "bangalore", "mumbai", "delhi", "gurgaon", "gurugram", "hyderabad", "pune", "chennai", "noida", "kolkata")):
+                if not _india_ok(loc):
                     continue
                 out.append({
                     "source": "greenhouse", "external_id": str(j.get("id", "")),
                     "title": (j.get("title") or "")[:300], "company": company,
                     "location": loc, "description": _clean(j.get("content", ""))[:6000],
                     "url": j.get("absolute_url", ""), "ats": "greenhouse",
-                    "salary": "", "posted_at": j.get("updated_at"),
+                    "apply_policy": "auto_ok",
+                    "salary": "", "posted_at": j.get("first_published") or j.get("updated_at"),
                 })
         except Exception as e:
-            log_event("ingest_error", {"source": f"greenhouse:{company}", "error": str(e)})
+            log_event("ingest_error", {"source": f"greenhouse:{company}", "error": str(e)[:300]})
+
     for company in seeds.get("lever", []):
         try:
-            data = requests.get(f"https://api.lever.co/v0/postings/{company}?mode=json", headers=HEADERS, timeout=20).json()
-            for j in data if isinstance(data, list) else []:
+            data = requests.get(f"https://api.lever.co/v0/postings/{company}?mode=json",
+                                headers=HEADERS, timeout=20).json()
+            for j in (data if isinstance(data, list) else []):
                 loc = ((j.get("categories") or {}).get("location") or "")
-                if loc and not any(k in loc.lower() for k in ("india", "remote", "bengaluru", "bangalore", "mumbai", "delhi", "gurgaon", "gurugram", "hyderabad", "pune", "chennai", "noida", "kolkata")):
+                if not _india_ok(loc):
                     continue
                 out.append({
-                    "source": "lever", "external_id": j.get("id", ""),
+                    "source": "lever", "external_id": str(j.get("id", "")),
                     "title": (j.get("text") or "")[:300], "company": company,
                     "location": loc, "description": _clean(j.get("descriptionPlain", ""))[:6000],
                     "url": j.get("hostedUrl", ""), "ats": "lever",
+                    "apply_policy": "auto_ok",
                     "salary": "", "posted_at": None,
                 })
         except Exception as e:
-            log_event("ingest_error", {"source": f"lever:{company}", "error": str(e)})
+            log_event("ingest_error", {"source": f"lever:{company}", "error": str(e)[:300]})
     return out
 
 
 def ingest_all() -> int:
-    total = 0
-    for fetcher in (fetch_adzuna, fetch_jooble, fetch_remotive, fetch_ats_boards):
-        rows = fetcher()
-        total += _save(rows)
-    log_event("ingest_done", {"new_jobs": total})
+    total, per_source = 0, {}
+    for fetcher in (fetch_adzuna, fetch_jooble, fetch_remotive,
+                    fetch_ats_boards, fetch_email_alerts):
+        try:
+            rows = fetcher()
+        except Exception as e:
+            log_event("ingest_error", {"source": fetcher.__name__, "error": str(e)[:300]})
+            continue
+        n = _save(rows)
+        per_source[fetcher.__name__] = n
+        total += n
+    log_event("ingest_done", {"new_jobs": total, "by_source": per_source})
     return total
