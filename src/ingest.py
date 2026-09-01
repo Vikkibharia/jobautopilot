@@ -3,7 +3,8 @@ import html
 import json
 import re
 import requests
-from .config import (sb, ADZUNA_APP_ID, ADZUNA_APP_KEY, JOOBLE_API_KEY, log_event)
+from .config import (sb, ADZUNA_APP_ID, ADZUNA_APP_KEY, JOOBLE_API_KEY,
+                     CAREERJET_AFFID, log_event)
 from .email_ingest import fetch_email_alerts
 
 HEADERS = {"User-Agent": "JobAutopilot/2.0"}
@@ -180,6 +181,125 @@ def fetch_remotive() -> list[dict]:
     return out
 
 
+def fetch_careerjet() -> list[dict]:
+    """Adzuna alternative: Careerjet's public search API has strong India coverage,
+    takes keyword queries, and the affiliate ID is issued INSTANTLY on free signup at
+    careerjet.com/partners (unlike Adzuna's sometimes-stuck registration emails)."""
+    if not CAREERJET_AFFID:
+        return []
+    out = []
+    for term in (_user_search_terms() or ["analyst"]):
+        try:
+            data = requests.get(
+                "https://public.api.careerjet.net/search",
+                params={"affid": CAREERJET_AFFID, "keywords": term, "location": "India",
+                        "locale_code": "en_IN", "sort": "date", "pagesize": "50",
+                        "user_ip": "1.2.3.4", "user_agent": HEADERS["User-Agent"]},
+                headers=HEADERS, timeout=30).json()
+        except Exception as e:
+            log_event("ingest_error", {"source": "careerjet", "term": term,
+                                       "error": str(e)[:300]})
+            continue
+        for j in data.get("jobs", []):
+            if not (j.get("title") and j.get("url")):
+                continue
+            out.append({
+                "source": "careerjet",
+                "external_id": "",
+                "title": _clean(j.get("title", ""))[:300],
+                "company": j.get("company", ""),
+                "location": j.get("locations", "India"),
+                "description": _clean(j.get("description", ""))[:6000],
+                "url": j.get("url", ""),
+                "ats": "unknown",
+                "salary": j.get("salary", ""),
+                "posted_at": j.get("date"),
+            })
+    return out
+
+
+def fetch_themuse() -> list[dict]:
+    """The Muse public API: keyless, lists roles at larger companies with real India
+    offices (many GCCs). Location-filtered server-side."""
+    locations = ["Bengaluru, India", "Mumbai, India", "Delhi, India", "Gurgaon, India",
+                 "Hyderabad, India", "Pune, India", "Chennai, India", "Noida, India"]
+    out = []
+    for page in (0, 1):
+        try:
+            data = requests.get("https://www.themuse.com/api/public/jobs",
+                                params=[("page", page)] + [("location", l) for l in locations],
+                                headers=HEADERS, timeout=30).json()
+        except Exception as e:
+            log_event("ingest_error", {"source": "themuse", "error": str(e)[:300]})
+            break
+        results = data.get("results") or []
+        if not results:
+            break
+        for j in results:
+            url = (j.get("refs") or {}).get("landing_page", "")
+            if not (j.get("name") and url):
+                continue
+            locs = ", ".join(l.get("name", "") for l in (j.get("locations") or []))
+            out.append({
+                "source": "themuse",
+                "external_id": str(j.get("id", "")),
+                "title": j.get("name", "")[:300],
+                "company": (j.get("company") or {}).get("name", ""),
+                "location": locs[:300] or "India",
+                "description": _clean(j.get("contents", ""))[:6000],
+                "url": url,
+                "ats": "unknown",
+                "salary": "",
+                "posted_at": j.get("publication_date"),
+            })
+    return out
+
+
+def fetch_remote_boards() -> list[dict]:
+    """Keyless remote-job APIs that accept India-based candidates:
+    RemoteOK + Jobicy (Remotive already runs separately)."""
+    out = []
+    try:
+        data = requests.get("https://remoteok.com/api", headers=HEADERS, timeout=30).json()
+        for j in (data[1:] if isinstance(data, list) else []):   # [0] is a legal notice
+            loc = (j.get("location") or "").lower()
+            if loc and not any(k in loc for k in ("india", "worldwide", "anywhere", "asia", "remote")):
+                continue
+            if not (j.get("position") and j.get("url")):
+                continue
+            out.append({
+                "source": "remoteok", "external_id": str(j.get("id", "")),
+                "title": j.get("position", "")[:300], "company": j.get("company", ""),
+                "location": f"Remote ({j.get('location') or 'anywhere'})",
+                "description": _clean(j.get("description", ""))[:6000],
+                "url": j.get("url", ""), "ats": "unknown",
+                "salary": "", "posted_at": j.get("date"),
+            })
+    except Exception as e:
+        log_event("ingest_error", {"source": "remoteok", "error": str(e)[:300]})
+
+    try:
+        data = requests.get("https://jobicy.com/api/v2/remote-jobs?count=50",
+                            headers=HEADERS, timeout=30).json()
+        for j in data.get("jobs", []):
+            geo = (j.get("jobGeo") or "").lower()
+            if geo and not any(k in geo for k in ("india", "anywhere", "apac", "asia")):
+                continue
+            if not (j.get("jobTitle") and j.get("url")):
+                continue
+            out.append({
+                "source": "jobicy", "external_id": str(j.get("id", "")),
+                "title": j.get("jobTitle", "")[:300], "company": j.get("companyName", ""),
+                "location": f"Remote ({j.get('jobGeo') or 'anywhere'})",
+                "description": _clean(j.get("jobDescription") or j.get("jobExcerpt") or "")[:6000],
+                "url": j.get("url", ""), "ats": "unknown",
+                "salary": "", "posted_at": j.get("pubDate"),
+            })
+    except Exception as e:
+        log_event("ingest_error", {"source": "jobicy", "error": str(e)[:300]})
+    return out
+
+
 # ---------------------------- open ATS boards ----------------------------
 
 def _india_ok(loc: str) -> bool:
@@ -233,13 +353,98 @@ def fetch_ats_boards() -> list[dict]:
                 })
         except Exception as e:
             log_event("ingest_error", {"source": f"lever:{company}", "error": str(e)[:300]})
+
+    # ---- Ashby (jobs.ashbyhq.com/<slug>) — public JSON, no key ----
+    for company in seeds.get("ashby", []):
+        try:
+            data = requests.get(f"https://api.ashbyhq.com/posting-api/job-board/{company}",
+                                headers=HEADERS, timeout=20).json()
+            for j in data.get("jobs", []):
+                loc = j.get("location") or ""
+                if not (_india_ok(loc) or j.get("isRemote")):
+                    continue
+                out.append({
+                    "source": "ashby", "external_id": str(j.get("id", "")),
+                    "title": (j.get("title") or "")[:300], "company": company,
+                    "location": loc, "description": _clean(j.get("descriptionHtml", ""))[:6000],
+                    "url": j.get("jobUrl") or j.get("applyUrl", ""), "ats": "ashby",
+                    "apply_policy": "auto_ok", "salary": "",
+                    "posted_at": j.get("publishedAt"),
+                })
+        except Exception as e:
+            log_event("ingest_error", {"source": f"ashby:{company}", "error": str(e)[:300]})
+
+    # ---- SmartRecruiters (careers.smartrecruiters.com/<Company>) — public, no key ----
+    for company in seeds.get("smartrecruiters", []):
+        try:
+            data = requests.get(
+                f"https://api.smartrecruiters.com/v1/companies/{company}/postings"
+                "?limit=100&country=in",       # server-side India filter (verified live)
+                headers=HEADERS, timeout=20).json()
+            for j in data.get("content", []):
+                loc = j.get("location") or {}
+                city, country = loc.get("city", ""), (loc.get("country") or "").lower()
+                if country and country != "in" and not _india_ok(city):
+                    continue
+                out.append({
+                    "source": "smartrecruiters", "external_id": str(j.get("id", "")),
+                    "title": (j.get("name") or "")[:300], "company": company,
+                    "location": ", ".join(x for x in (city, loc.get("region", "")) if x) or "India",
+                    "description": "",           # postings list carries no JD; scorer knows
+                    "url": f"https://jobs.smartrecruiters.com/{company}/{j.get('id')}",
+                    "ats": "smartrecruiters", "apply_policy": "auto_ok",
+                    "salary": "", "posted_at": j.get("releasedDate"),
+                })
+        except Exception as e:
+            log_event("ingest_error", {"source": f"smartrecruiters:{company}",
+                                       "error": str(e)[:300]})
+
+    # ---- Workable (apply.workable.com/<account>) — public widget API, no key ----
+    for company in seeds.get("workable", []):
+        try:
+            data = requests.get(
+                f"https://apply.workable.com/api/v1/widget/accounts/{company}?details=true",
+                headers=HEADERS, timeout=20).json()
+            for j in data.get("jobs", []):
+                loc = ", ".join(x for x in (j.get("city", ""), j.get("country", "")) if x)
+                if not _india_ok(loc):
+                    continue
+                out.append({
+                    "source": "workable", "external_id": str(j.get("shortcode", "")),
+                    "title": (j.get("title") or "")[:300], "company": company,
+                    "location": loc, "description": _clean(j.get("description", ""))[:6000],
+                    "url": j.get("url", ""), "ats": "workable",
+                    "apply_policy": "auto_ok", "salary": "", "posted_at": None,
+                })
+        except Exception as e:
+            log_event("ingest_error", {"source": f"workable:{company}", "error": str(e)[:300]})
+
+    # ---- Recruitee (<company>.recruitee.com) — public JSON, no key ----
+    for company in seeds.get("recruitee", []):
+        try:
+            data = requests.get(f"https://{company}.recruitee.com/api/offers/",
+                                headers=HEADERS, timeout=20).json()
+            for j in data.get("offers", []):
+                loc = ", ".join(x for x in (j.get("city", ""), j.get("country", "")) if x)
+                if not _india_ok(loc):
+                    continue
+                out.append({
+                    "source": "recruitee", "external_id": str(j.get("id", "")),
+                    "title": (j.get("title") or "")[:300], "company": company,
+                    "location": loc, "description": _clean(j.get("description", ""))[:6000],
+                    "url": j.get("careers_url", ""), "ats": "recruitee",
+                    "apply_policy": "auto_ok", "salary": "", "posted_at": None,
+                })
+        except Exception as e:
+            log_event("ingest_error", {"source": f"recruitee:{company}", "error": str(e)[:300]})
     return out
 
 
 def ingest_all() -> int:
     total, per_source = 0, {}
-    for fetcher in (fetch_adzuna, fetch_jooble, fetch_remotive,
-                    fetch_ats_boards, fetch_email_alerts):
+    for fetcher in (fetch_adzuna, fetch_careerjet, fetch_jooble, fetch_themuse,
+                    fetch_remotive, fetch_remote_boards, fetch_ats_boards,
+                    fetch_email_alerts):
         try:
             rows = fetcher()
         except Exception as e:
