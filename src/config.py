@@ -6,6 +6,11 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 ADZUNA_APP_ID = os.environ.get("ADZUNA_APP_ID", "")
 ADZUNA_APP_KEY = os.environ.get("ADZUNA_APP_KEY", "")
 JOOBLE_API_KEY = os.environ.get("JOOBLE_API_KEY", "")
+CAREERJET_AFFID = os.environ.get("CAREERJET_AFFID", "")   # free, instant at careerjet.com/partners
+
+# Optional: your own Telegram chat id. If set, daily health reports and failure alerts
+# go only to you; if left empty, health reports go to every active user.
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
 
 # ---- Phase 3: job-alert email inbox (all optional; empty = feature simply off) ----
 ALERT_IMAP_HOST = os.environ.get("ALERT_IMAP_HOST", "imap.gmail.com")
