@@ -2,7 +2,7 @@ name: Job Scan
 
 on:
   schedule:
-    - cron: "7,27,47 * * * *"   # every 20 minutes (GitHub cron is best-effort; drift is normal)
+    - cron: "7,27,47 * * * *"   # every 20 min at quiet minutes — :00/:20/:40 are so busy GitHub skips them
   workflow_dispatch: {}       # allows manual "Run workflow" button
 
 permissions:
