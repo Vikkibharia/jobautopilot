@@ -2,7 +2,7 @@ name: Job Scan
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes (GitHub cron is best-effort; drift is normal)
+    - cron: "7,27,47 * * * *"   # every 20 min at quiet minutes — :00/:20/:40 are so busy GitHub skips them
   workflow_dispatch: {}       # allows manual "Run workflow" button
 
 permissions:
@@ -35,8 +35,23 @@ jobs:
           ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
           ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
           JOOBLE_API_KEY: ${{ secrets.JOOBLE_API_KEY }}
+          CAREERJET_AFFID: ${{ secrets.CAREERJET_AFFID }}
           # Phase 3 — job-alert mailbox (leave unset and email ingest just stays off)
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
           ALERT_EMAIL_APP_PASSWORD: ${{ secrets.ALERT_EMAIL_APP_PASSWORD }}
           ALERT_IMAP_HOST: ${{ secrets.ALERT_IMAP_HOST }}
+          # Optional: your own Telegram chat id → daily health report + failure alerts
+          ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
         run: python -m src.main
+
+      - name: Telegram alert if the run failed
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
+        run: |
+          if [ -n "$ADMIN_CHAT_ID" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${ADMIN_CHAT_ID}" \
+              --data-urlencode text="❌ JobAutopilot run FAILED. Open the log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} — click 'scan', open the red step, read the last lines." > /dev/null
+          fi
