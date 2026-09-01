@@ -8,6 +8,7 @@ from .config import (sb, get_cursor, set_cursor, log_event, MAX_LLM_SCORES_PER_R
 from . import telegram as tg
 from . import ingest
 from . import apply as ap
+from . import digest
 from .llm import parse_cv, score_jobs
 
 HELP = (
@@ -208,6 +209,10 @@ def _handle_message(msg: dict) -> None:
             return
         profile = dict(user.get("profile") or {})
         profile["lateral_titles"] = titles[:10]
+        # FIX: /watch is authoritative. Stale CV-derived next_step_titles used to keep
+        # leaking into the prefilter and the Adzuna/Jooble search terms, so a bad CV
+        # parse (e.g. the junior demotion) survived a /watch override.
+        profile["next_step_titles"] = []
         sb.table("users").update({"profile": profile}).eq("id", user["id"]).execute()
         tg.send(chat_id, "🎯 Now hunting: " + ", ".join(titles[:10])
                 + "\nThese also become the search terms I send to the job APIs.")
@@ -254,7 +259,7 @@ def _handle_message(msg: dict) -> None:
                 .eq("user_id", user["id"]).eq("status", "applied").execute()
             tg.send(chat_id, f"📊 Matches surfaced: {mt.count or 0}\n"
                              f"✅ Applied: {apd.count or 0}\n"
-                             f"📅 Applied in last 24h: {ap.applications_today(user['id'])}"
+                             f"📅 Apply packages in last 24h: {ap.applications_today(user['id'])}"
                              f" / cap {user.get('daily_apply_cap', 10)}\n"
                              f"🎚 Threshold: {user['threshold']} · Apply mode: "
                              f"{user.get('apply_mode', 'off')}")
@@ -359,22 +364,45 @@ def run_matching() -> None:
             continue
 
         candidates = [j for j in jobs if _prefilter(profile, j)]
+        if not candidates:
+            # FIX: nothing in this page can ever match this profile, so clear the whole
+            # page. Previously the cursor never advanced here, so once 400+ non-matching
+            # jobs piled up the user was stuck re-scanning them forever and never
+            # reached anything newer.
+            set_cursor(user["id"], jobs[-1]["id"])
+            continue
+
         user_batches = min(MAX_LLM_BATCHES_PER_USER, total_budget)
-        sent, last_considered, batches_used = 0, cursor, 0
+        sent, batches_used = 0, 0
+        cleared_upto = cursor      # highest candidate id whose batch scored successfully
+        stopped_early = False      # budget / message cap / error ended the page early
         assisted = user.get("apply_mode") == "assisted"
+
+        # Location prefs make the scorer cap jobs in cities you'd never move to.
+        answers = ap.get_answers(user["id"])
+        prefs = {"home_locations": profile.get("locations"),
+                 "current_location": answers.get("current_location"),
+                 "willing_to_relocate": answers.get("willing_to_relocate")}
+        # Everything surfaced in the last 45 days, for the cross-source duplicate guard.
+        surfaced = ap.recent_match_pairs(user["id"])
 
         for i in range(0, len(candidates), 8):
             if batches_used >= user_batches or sent >= MAX_MATCH_MESSAGES_PER_USER:
+                stopped_early = True
                 break
             batch = candidates[i:i + 8]
             batches_used += 1
             total_budget -= 1
             try:
-                results = score_jobs(profile, batch)
+                results = score_jobs(profile, batch, prefs)
             except Exception as e:
                 log_event("score_error", {"user_id": user["id"], "error": str(e)[:300]})
-                continue      # cursor does NOT advance past this batch -> retried next run
+                # FIX: stop here rather than skipping ahead — the cursor must never
+                # pass an unscored batch, otherwise those jobs are lost forever.
+                stopped_early = True
+                break
 
+            chat_dead = False
             for res in results:
                 try:
                     job = batch[int(res["index"])]
@@ -390,6 +418,13 @@ def run_matching() -> None:
                                                    "reason": reason})
                     continue
 
+                # Same role found by a second source (different id, so dedup_hash
+                # let it in) — never notify twice.
+                if ap.is_duplicate_surface(surfaced, job):
+                    log_event("match_suppressed", {"user_id": user["id"], "job": job["id"],
+                                                   "reason": "duplicate of an earlier match"})
+                    continue
+
                 try:
                     ins = sb.table("matches").insert({
                         "user_id": user["id"], "job_id": job["id"], "score": score,
@@ -397,6 +432,8 @@ def run_matching() -> None:
                         "rationale": res.get("rationale", ""),
                     }).execute()
                     match_id = ins.data[0]["id"]
+                    surfaced.append((ap._norm_key(job.get("title")),
+                                     ap._norm_key(job.get("company"))))
                 except Exception:
                     continue      # already surfaced before
 
@@ -425,25 +462,32 @@ def run_matching() -> None:
                     body += "\n\n🧢 Daily application cap reached — saved for tomorrow."
 
                 if not tg.send(chat_id, body, buttons=_match_buttons(match_id, job["url"])):
-                    break     # chat is dead (blocked/deleted); stop pushing to it this run
+                    chat_dead = True   # blocked/deleted; stop pushing to this chat
+                    break
                 sent += 1
 
-            last_considered = max(last_considered, max(j["id"] for j in batch))
+            cleared_upto = max(cleared_upto, max(j["id"] for j in batch))
+            if chat_dead:
+                stopped_early = True
+                break
 
-        # Advance only past jobs we actually scored, plus any that the prefilter rejected
-        # before them — never past a batch that errored or that the budget never reached.
-        scored_upto = last_considered
-        prefiltered_upto = max([j["id"] for j in jobs
-                                if j["id"] <= scored_upto] or [scored_upto])
-        if batches_used and batches_used * 8 >= len(candidates):
-            prefiltered_upto = jobs[-1]["id"]          # whole page cleared
-        set_cursor(user["id"], max(cursor, prefiltered_upto))
+        # Advance past everything actually dealt with: the whole page when every
+        # candidate batch scored, otherwise only up to the last successful batch
+        # (prefilter-rejected jobs below it are covered implicitly; anything above
+        # it is retried next run).
+        set_cursor(user["id"],
+                   max(cursor, jobs[-1]["id"] if not stopped_early else cleared_upto))
 
 
 def main() -> None:
     handle_updates()      # registrations, CV uploads, commands, button taps
     ingest.ingest_all()   # pull fresh jobs (APIs + open ATS + alert emails)
     run_matching()        # score for every active user & notify
+    try:
+        digest.run_daily_health()     # once a day: is everything actually working?
+        digest.run_weekly_digest()    # Mondays: your numbers + tuning suggestions
+    except Exception as e:
+        log_event("digest_error", {"error": str(e)[:300]})
     handle_updates()      # catch anything sent during the run
 
 
