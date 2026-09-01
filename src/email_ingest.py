@@ -27,6 +27,15 @@ SOURCES = [
     ("email:instahyre", r"instahyre\.com",  r"instahyre\.com/[^\s\"'<>]*(?:job|opportunit)[^\s\"'<>]*"),
     ("email:iimjobs",   r"iimjobs\.com",    r"iimjobs\.com/j/[^\s\"'<>]*"),
     ("email:indeed",    r"indeed\.com",     r"indeed\.com/(?:viewjob|rc/clk)[^\s\"'<>]*"),
+    # Wider India coverage — set up alerts on whichever of these you use, forward
+    # their emails to the alert mailbox, and they parse like the ones above.
+    ("email:foundit",   r"foundit\.(?:in|com)", r"foundit\.in/[^\s\"'<>]*job[^\s\"'<>]*"),
+    ("email:hirist",    r"hirist\.(?:com|tech)", r"hirist\.(?:com|tech)/[^\s\"'<>]*\d{4,}[^\s\"'<>]*"),
+    ("email:cutshort",  r"cutshort\.io",    r"cutshort\.io/job[^\s\"'<>]*"),
+    ("email:shine",     r"shine\.com",      r"shine\.com/jobs/[^\s\"'<>]*"),
+    ("email:timesjobs", r"timesjobs\.com",  r"timesjobs\.com/[^\s\"'<>]*job[^\s\"'<>]*"),
+    ("email:wellfound", r"wellfound\.com",  r"wellfound\.com/(?:jobs|l/)[^\s\"'<>]*"),
+    ("email:glassdoor", r"glassdoor\.(?:com|co\.in)", r"glassdoor\.(?:com|co\.in)/[Jj]ob[^\s\"'<>]*"),
 ]
 
 ANCHOR_RE = re.compile(r"<a\b[^>]*?href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", re.S | re.I)
