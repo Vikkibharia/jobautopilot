@@ -200,6 +200,12 @@ def fetch_careerjet() -> list[dict]:
             log_event("ingest_error", {"source": "careerjet", "term": term,
                                        "error": str(e)[:300]})
             continue
+        # Careerjet reports problems (bad key, undeclared IP, throttling) inside a
+        # normal-looking response. Surface them instead of counting them as "0 jobs".
+        if data.get("type") and data.get("type") != "JOBS":
+            log_event("ingest_error", {"source": "careerjet", "term": term,
+                                       "error": str(data)[:250]})
+            continue
         for j in data.get("jobs", []):
             if not (j.get("title") and j.get("url")):
                 continue
