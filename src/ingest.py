@@ -2,6 +2,8 @@ import hashlib
 import html
 import json
 import re
+from email.utils import parsedate_to_datetime
+
 import requests
 from .config import (sb, ADZUNA_APP_ID, ADZUNA_APP_KEY, JOOBLE_API_KEY,
                      CAREERJET_AFFID, log_event)
@@ -181,30 +183,42 @@ def fetch_remotive() -> list[dict]:
     return out
 
 
+def _rfc_date(s: str) -> str | None:
+    """Careerjet dates arrive like 'Wed,15 Nov 2025 19:13:43 GMT' — convert to ISO
+    so a single odd date can never make the database reject a whole batch."""
+    try:
+        return parsedate_to_datetime(s).isoformat()
+    except Exception:
+        return None
+
+
 def fetch_careerjet() -> list[dict]:
-    """Adzuna alternative: Careerjet's public search API has strong India coverage,
-    takes keyword queries, and the affiliate ID is issued INSTANTLY on free signup at
-    careerjet.com/partners (unlike Adzuna's sometimes-stuck registration emails)."""
+    """Adzuna alternative: Careerjet's Search API v4 has strong India coverage and
+    takes keyword queries. The key from the publisher dashboard is used as the
+    basic-auth username with an empty password (per their v4 docs). Note: the old
+    public.api.careerjet.net endpoint is closed to new accounts — don't go back."""
     if not CAREERJET_AFFID:
         return []
     out = []
     for term in (_user_search_terms() or ["analyst"]):
         try:
-            data = requests.get(
-                "https://public.api.careerjet.net/search",
-                params={"affid": CAREERJET_AFFID, "keywords": term, "location": "India",
-                        "locale_code": "en_IN", "sort": "date", "pagesize": "50",
+            r = requests.get(
+                "https://search.api.careerjet.net/v4/query",
+                params={"locale_code": "en_IN", "keywords": term, "location": "India",
+                        "sort": "date", "page_size": "50", "fragment_size": "1000",
                         "user_ip": "1.2.3.4", "user_agent": HEADERS["User-Agent"]},
-                headers=HEADERS, timeout=30).json()
+                auth=(CAREERJET_AFFID, ""), headers=HEADERS, timeout=30)
+            data = r.json()
         except Exception as e:
             log_event("ingest_error", {"source": "careerjet", "term": term,
                                        "error": str(e)[:300]})
             continue
-        # Careerjet reports problems (bad key, undeclared IP, throttling) inside a
-        # normal-looking response. Surface them instead of counting them as "0 jobs".
-        if data.get("type") and data.get("type") != "JOBS":
+        # Careerjet reports problems (bad key, unknown location, throttling) inside
+        # the response body. Surface them instead of counting them as "0 jobs".
+        if data.get("type") != "JOBS":
             log_event("ingest_error", {"source": "careerjet", "term": term,
-                                       "error": str(data)[:250]})
+                                       "error": (str(data.get("error") or data.get("message")
+                                                     or data) + f" [http {r.status_code}]")[:250]})
             continue
         for j in data.get("jobs", []):
             if not (j.get("title") and j.get("url")):
@@ -219,7 +233,7 @@ def fetch_careerjet() -> list[dict]:
                 "url": j.get("url", ""),
                 "ats": "unknown",
                 "salary": j.get("salary", ""),
-                "posted_at": j.get("date"),
+                "posted_at": _rfc_date(j.get("date", "")),
             })
     return out
 
