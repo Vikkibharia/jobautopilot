@@ -28,6 +28,7 @@ and nothing can ever be sent in your name that you didn't see.
 """
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 from .config import sb, DEFAULT_DAILY_APPLY_CAP, APPLY_COOLDOWN_DAYS, log_event
@@ -125,6 +126,42 @@ def is_blocked(user: dict, job: dict) -> str | None:
     return None
 
 
+def _norm_key(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def recent_match_pairs(user_id: int) -> list[tuple[str, str]]:
+    """(title, company) of everything surfaced to this user in the last 45 days,
+    normalised. One query per user per run."""
+    since = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()
+    pairs = []
+    try:
+        r = (sb.table("matches").select("jobs(title,company)")
+             .eq("user_id", user_id).gte("created_at", since).limit(500).execute())
+        for row in (r.data or []):
+            j = row.get("jobs") or {}
+            t, c = _norm_key(j.get("title")), _norm_key(j.get("company"))
+            if t:
+                pairs.append((t, c))
+    except Exception:
+        pass
+    return pairs
+
+
+def is_duplicate_surface(pairs: list[tuple[str, str]], job: dict) -> bool:
+    """Cross-source duplicate guard: the same role often appears on two boards with
+    different external ids, so dedup_hash lets both into the jobs table. Never ping
+    the user twice. Company matches on prefix so 'razorpay' (an ATS slug) still
+    matches 'Razorpay Software Private Limited' (an aggregator's name)."""
+    t, c = _norm_key(job.get("title")), _norm_key(job.get("company"))
+    if not t:
+        return False
+    for pt, pc in pairs:
+        if pt == t and (pc == c or (pc and c and (pc.startswith(c) or c.startswith(pc)))):
+            return True
+    return False
+
+
 def cap_reached(user: dict) -> bool:
     cap = int(user.get("daily_apply_cap") or DEFAULT_DAILY_APPLY_CAP)
     return applications_today(user["id"]) >= cap
@@ -162,8 +199,24 @@ def build_package(user: dict, job: dict, score: int, rationale: str) -> tuple[st
 def record_application(user_id: int, match_id: int, job: dict, method: str,
                        cover: str = "", tier: int = 1) -> None:
     """Audit-first: the snapshot is written when the package is handed over, so there
-    is always a record of exactly what was put in front of you (or submitted)."""
+    is always a record of exactly what was put in front of you (or submitted).
+
+    FIX: one row per match. Previously every "📝 Cover letter" tap and every
+    "✅ Applied" tap after an assisted package inserted ANOTHER row, so a single job
+    could eat 2-3 slots of the daily cap and inflate the stats. Now a second call for
+    the same match updates the existing row instead."""
     try:
+        existing = (sb.table("applications").select("id")
+                    .eq("match_id", match_id).limit(1).execute().data)
+        if existing:
+            upd = {"method": method,
+                   "outcome": "package_ready" if method == "assisted" else "submitted"}
+            if method != "assisted":
+                upd["submitted_at"] = "now"
+            if cover:
+                upd["cover_letter"] = cover[:4000]
+            sb.table("applications").update(upd).eq("id", existing[0]["id"]).execute()
+            return
         sb.table("applications").insert({
             "user_id": user_id,
             "match_id": match_id,
