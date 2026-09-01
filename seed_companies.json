@@ -1,9 +1,10 @@
 {
-  "_note": "Greenhouse/Lever slugs = the last path segment of a company's careers URL. A wrong slug just logs an ingest_error and is skipped, so guessing is cheap. Verify at boards.greenhouse.io/<slug> or jobs.lever.co/<slug>.",
-  "greenhouse": ["razorpay", "postman", "hasura", "cred", "meesho", "groww", "gojek",
-                 "phonepe", "browserstack", "innovaccer", "swiggy", "zomato", "nykaa",
-                 "sharechat", "unacademy", "purplle", "urbancompany", "lenskart",
-                 "zetwerk", "licious", "bigbasket", "physicswallah"],
-  "lever": ["zepto", "atlan", "netradyne", "porter", "medgenome", "dunzo",
-            "mamaearth", "wakefit", "boat-lifestyle", "cultfit", "jupiter"]
+  "_note": "Slugs = the company's segment in its careers URL. A wrong slug just logs an ingest_error and is skipped, so guessing is cheap — and the daily health report now names dead slugs so you can prune them. Verify at: boards.greenhouse.io/<slug> · jobs.lever.co/<slug> · jobs.ashbyhq.com/<slug> · careers.smartrecruiters.com/<Company> · apply.workable.com/<account> · <company>.recruitee.com",
+  "_verified": "Every slug below returned a live board on 2026-09-01. Companies move ATS providers often — when the health report flags one as dead, look up the company's careers page and move its slug to the right section.",
+  "greenhouse": ["postman", "groww"],
+  "lever": ["porter", "cred", "meesho"],
+  "ashby": ["sarvam"],
+  "smartrecruiters": ["ServiceNow", "BoschGroup", "Continental", "McDonaldsCorporation"],
+  "workable": [],
+  "recruitee": []
 }
