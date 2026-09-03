@@ -38,6 +38,12 @@ SOURCES = [
     ("email:glassdoor", r"glassdoor\.(?:com|co\.in)", r"glassdoor\.(?:com|co\.in)/[Jj]ob[^\s\"'<>]*"),
 ]
 
+# Only mail FROM these domains is ever fetched or marked read. This makes the bot
+# safe to point at a personal inbox: everything else in there is never touched.
+SENDER_DOMAINS = ("linkedin.com", "naukri.com", "instahyre.com", "iimjobs.com",
+                  "indeed.com", "foundit.in", "hirist", "cutshort.io", "shine.com",
+                  "timesjobs.com", "wellfound.com", "glassdoor")
+
 ANCHOR_RE = re.compile(r"<a\b[^>]*?href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", re.S | re.I)
 TAG_RE = re.compile(r"<[^>]+>")
 WS_RE = re.compile(r"\s+")
@@ -159,8 +165,18 @@ def fetch_email_alerts() -> list[dict]:
         box = imaplib.IMAP4_SSL(ALERT_IMAP_HOST)
         box.login(ALERT_EMAIL, ALERT_EMAIL_APP_PASSWORD)
         box.select("INBOX")
-        typ, data = box.search(None, "UNSEEN")
-        ids = (data[0].split() if data and data[0] else [])[-MAX_EMAILS_PER_RUN:]
+        # Search per known sender instead of a blanket UNSEEN sweep, so a personal
+        # inbox can be used safely — the bot never reads or marks anyone else's mail.
+        ids = []
+        for dom in SENDER_DOMAINS:
+            try:
+                typ, data = box.search(None, "UNSEEN", "FROM", f'"{dom}"')
+                for n in (data[0].split() if data and data[0] else []):
+                    if n not in ids:
+                        ids.append(n)
+            except Exception:
+                continue
+        ids = ids[-MAX_EMAILS_PER_RUN:]
 
         for num in ids:
             try:
