@@ -36,13 +36,18 @@ SOURCES = [
     ("email:timesjobs", r"timesjobs\.com",  r"timesjobs\.com/[^\s\"'<>]*job[^\s\"'<>]*"),
     ("email:wellfound", r"wellfound\.com",  r"wellfound\.com/(?:jobs|l/)[^\s\"'<>]*"),
     ("email:glassdoor", r"glassdoor\.(?:com|co\.in)", r"glassdoor\.(?:com|co\.in)/[Jj]ob[^\s\"'<>]*"),
+    # Google Alerts on 'site:linkedin.com/posts "hiring" ...' — catches people
+    # ANNOUNCING openings in LinkedIn posts, which LinkedIn's own job alerts never
+    # cover. The link in the email is Google-wrapped, so match the inner URL.
+    ("email:linkedin-post", r"googlealerts", r"linkedin\.com/posts/[^\s\"'<>]*"),
 ]
 
 # Only mail FROM these domains is ever fetched or marked read. This makes the bot
 # safe to point at a personal inbox: everything else in there is never touched.
 SENDER_DOMAINS = ("linkedin.com", "naukri.com", "instahyre.com", "iimjobs.com",
                   "indeed.com", "foundit.in", "hirist", "cutshort.io", "shine.com",
-                  "timesjobs.com", "wellfound.com", "glassdoor")
+                  "timesjobs.com", "wellfound.com", "glassdoor",
+                  "googlealerts-noreply")   # precise sender, so no other Google mail is touched
 
 ANCHOR_RE = re.compile(r"<a\b[^>]*?href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", re.S | re.I)
 TAG_RE = re.compile(r"<[^>]+>")
