@@ -76,7 +76,7 @@ def run_daily_health() -> None:
     events = (sb.table("events").select("kind,detail")
               .gte("created_at", since).limit(2000).execute().data) or []
 
-    runs, by_source, errors, dead_slugs = 0, {}, {}, set()
+    runs, by_source, errors = 0, {}, {}
     for e in events:
         kind, detail = e.get("kind", ""), e.get("detail") or {}
         if kind == "ingest_done":
@@ -86,11 +86,13 @@ def run_daily_health() -> None:
         elif kind == "ingest_error":
             src = str(detail.get("source", ""))
             errors[src or "ingest"] = errors.get(src or "ingest", 0) + 1
-            # greenhouse:xyz / lever:xyz / ashby:xyz that error every run = dead slug
-            if ":" in src:
-                dead_slugs.add(src)
         elif kind.endswith("_error") or kind.endswith("_failed"):
             errors[kind] = errors.get(kind, 0) + 1
+
+    # A slug is only called dead when it fails in at least 5 runs AND most runs —
+    # a single timeout on a healthy board must not raise a false alarm.
+    dead_slugs = {s for s, c in errors.items()
+                  if ":" in s and c >= 5 and runs and c >= runs // 2}
 
     matches24 = (sb.table("matches").select("id", count="exact")
                  .gte("created_at", since).execute().count) or 0
